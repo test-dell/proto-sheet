@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { ScrollArea } from './ui/scroll-area';
 import { ArrowLeft, Save, Share2, Plus, Trash2, Trophy, Eye } from 'lucide-react';
 import { DASheet, Template, Vendor, JudgmentEvaluation, VendorScores, SharedAccess, AccessLevel } from '../types/da-types';
-import { toast } from 'sonner@2.0.3';
+import { toast } from 'sonner';
 import { DAPreview } from './DAPreview';
 
 interface DAEditorProps {

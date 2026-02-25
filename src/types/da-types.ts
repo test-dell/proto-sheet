@@ -1,3 +1,9 @@
+export interface User {
+  empCode: string;
+  role: 'admin' | 'user';
+  email: string;
+}
+
 export type DAType = 'License' | 'Custom Development' | 'SaaS';
 export type DAStatus = 'Draft' | 'Submitted' | 'Approved';
 export type AccessLevel = 'view' | 'edit';

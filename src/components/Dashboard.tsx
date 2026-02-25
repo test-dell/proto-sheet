@@ -13,15 +13,9 @@ import {
   Settings,
   LayoutDashboard
 } from 'lucide-react';
-import { DASheet } from '../types/da-types';
-import { toast } from 'sonner@2.0.3';
+import { User, DASheet } from '../types/da-types';
+import { toast } from 'sonner';
 import { UserHeader } from './UserHeader';
-
-interface User {
-  empCode: string;
-  role: 'admin' | 'user';
-  email: string;
-}
 
 interface DashboardProps {
   user: User;

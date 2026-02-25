@@ -4,11 +4,12 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Card, CardContent } from './ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { Shield, User, Mail, Lock, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
-import { toast } from 'sonner@2.0.3';
+import { Shield, User as UserIcon, Mail, Lock, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { User } from '../types/da-types';
 
 interface AuthProps {
-  onLogin: (user: { empCode: string; role: 'admin' | 'user'; email: string }) => void;
+  onLogin: (user: User) => void;
 }
 
 export function Auth({ onLogin }: AuthProps) {
@@ -25,7 +26,7 @@ export function Auth({ onLogin }: AuthProps) {
 
   const handleSignIn = (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!signInData.empCode || !signInData.password) {
       toast.error('Please enter both employee code and password');
       return;
@@ -45,7 +46,7 @@ export function Auth({ onLogin }: AuthProps) {
 
   const handleSignUp = (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!signUpData.email || !signUpData.password || !signUpData.confirmPassword) {
       toast.error('Please fill in all fields');
       return;
@@ -98,7 +99,7 @@ export function Auth({ onLogin }: AuthProps) {
             <Tabs defaultValue="signin" className="w-full">
               <TabsList className="grid w-full grid-cols-2 mb-6">
                 <TabsTrigger value="signin" className="flex items-center gap-2">
-                  <User className="w-4 h-4" />
+                  <UserIcon className="w-4 h-4" />
                   Sign In
                 </TabsTrigger>
                 <TabsTrigger value="signup" className="flex items-center gap-2">
@@ -112,7 +113,7 @@ export function Auth({ onLogin }: AuthProps) {
                 <form onSubmit={handleSignIn} className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="signin-empcode" className="flex items-center gap-2">
-                      <User className="w-4 h-4 text-indigo-600" />
+                      <UserIcon className="w-4 h-4 text-indigo-600" />
                       Employee Code
                     </Label>
                     <Input
@@ -143,14 +144,15 @@ export function Auth({ onLogin }: AuthProps) {
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
                       >
                         {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
                     </div>
                   </div>
 
-                  <Button 
-                    type="submit" 
+                  <Button
+                    type="submit"
                     className="w-full h-12 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-lg"
                   >
                     Sign In
@@ -201,6 +203,7 @@ export function Auth({ onLogin }: AuthProps) {
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
                       >
                         {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
@@ -222,8 +225,8 @@ export function Auth({ onLogin }: AuthProps) {
                     />
                   </div>
 
-                  <Button 
-                    type="submit" 
+                  <Button
+                    type="submit"
                     className="w-full h-12 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-lg"
                   >
                     Create Account
@@ -235,7 +238,7 @@ export function Auth({ onLogin }: AuthProps) {
         </Card>
 
         <p className="text-center text-sm text-gray-600 mt-6">
-          © 2024 HMSI - Decision Analysis System
+          &copy; 2025 HMSI - Decision Analysis System
         </p>
       </div>
     </div>

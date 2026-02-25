@@ -7,16 +7,10 @@ import { TemplateEditPage } from './components/TemplateEditPage';
 import { DAEditor } from './components/DAEditor';
 import { TemplateHistory } from './components/TemplateHistory';
 import { Toaster } from './components/ui/sonner';
-import { DASheet, Template } from './types/da-types';
+import { User, DASheet, Template } from './types/da-types';
 import { defaultTemplates, mockDASheets } from './data/mock-data';
 
 export type Screen = 'dashboard' | 'da-editor-screen' | 'template-editor' | 'template-edit-page' | 'vendor-evaluation' | 'history';
-
-interface User {
-  empCode: string;
-  role: 'admin' | 'user';
-  email: string;
-}
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -180,8 +174,6 @@ export default function App() {
 
       {currentScreen === 'template-edit-page' && editingTemplate && (
         <TemplateEditPage
-          user={user}
-          onLogout={handleLogout}
           template={editingTemplate}
           onSave={handleSaveTemplate}
           onPublish={handleSaveTemplate}
@@ -191,8 +183,6 @@ export default function App() {
 
       {currentScreen === 'vendor-evaluation' && selectedSheet && selectedTemplate && (
         <DAEditor
-          user={user}
-          onLogout={handleLogout}
           sheet={selectedSheet}
           template={selectedTemplate}
           onSave={handleSaveSheet}
@@ -202,8 +192,6 @@ export default function App() {
 
       {currentScreen === 'history' && (
         <TemplateHistory
-          user={user}
-          onLogout={handleLogout}
           daSheets={daSheets}
           onEditSheet={handleEditSheet}
           onDuplicateSheet={handleDuplicateSheet}
