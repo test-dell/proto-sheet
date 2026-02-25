@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Badge } from './ui/badge';
 import { ArrowLeft, Plus, Trash2, Save, Rocket } from 'lucide-react';
 import { Template, JudgmentParameter, CategoryData } from '../types/da-types';
-import { toast } from 'sonner@2.0.3';
+import { toast } from 'sonner';
 
 interface TemplateEditPageProps {
   template: Template;

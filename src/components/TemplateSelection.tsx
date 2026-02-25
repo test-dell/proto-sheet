@@ -8,15 +8,9 @@ import { Badge } from './ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { AlertDialog, AlertDialogAction, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from './ui/alert-dialog';
 import { ArrowLeft, ArrowRight, CheckCircle, Plus, Trash2 } from 'lucide-react';
-import { Template, JudgmentParameter, CategoryData } from '../types/da-types';
-import { toast } from 'sonner@2.0.3';
+import { User, Template, JudgmentParameter, CategoryData } from '../types/da-types';
+import { toast } from 'sonner';
 import { UserHeader } from './UserHeader';
-
-interface User {
-  empCode: string;
-  role: 'admin' | 'user';
-  email: string;
-}
 
 interface TemplateSelectionProps {
   user: User;

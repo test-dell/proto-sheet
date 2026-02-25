@@ -1,12 +1,7 @@
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { LogOut, User as UserIcon } from 'lucide-react';
-
-interface User {
-  empCode: string;
-  role: 'admin' | 'user';
-  email: string;
-}
+import { User } from '../types/da-types';
 
 interface UserHeaderProps {
   user: User;

@@ -7,7 +7,7 @@ import { Badge } from './ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { ArrowLeft, Search, Download, Copy, Edit, Trash2 } from 'lucide-react';
 import { DASheet, DAType } from '../types/da-types';
-import { toast } from 'sonner@2.0.3';
+import { toast } from 'sonner';
 
 interface TemplateHistoryProps {
   daSheets: DASheet[];

@@ -9,15 +9,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Badge } from './ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { ArrowLeft, Plus, Edit2, Trash2, Eye, EyeOff } from 'lucide-react';
-import { Template } from '../types/da-types';
-import { toast } from 'sonner@2.0.3';
+import { User, Template } from '../types/da-types';
+import { toast } from 'sonner';
 import { UserHeader } from './UserHeader';
-
-interface User {
-  empCode: string;
-  role: 'admin' | 'user';
-  email: string;
-}
 
 interface TemplateEditorProps {
   user: User;
