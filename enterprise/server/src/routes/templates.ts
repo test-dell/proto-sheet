@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb } from '../db/index.js';
+import oracledb from 'oracledb';
+import { getConnection, transaction, execute } from '../db/index.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validation.js';
 import {
@@ -17,67 +18,72 @@ const router = Router();
 // All template routes require authentication
 router.use(authenticate);
 
+// Oracle returns UPPERCASE column names
 interface CategoryRow {
-  id: string;
-  template_id: string;
-  name: string;
-  sort_order: number;
+  ID: string;
+  TEMPLATE_ID: string;
+  NAME: string;
+  SORT_ORDER: number;
 }
 
 interface ParameterRow {
-  id: string;
-  category_id: string;
-  name: string;
-  weightage: number;
-  comment: string;
-  sort_order: number;
+  ID: string;
+  CATEGORY_ID: string;
+  NAME: string;
+  WEIGHTAGE: number;
+  COMMENT: string;
+  SORT_ORDER: number;
 }
 
 interface TemplateRow {
-  id: string;
-  name: string;
-  type: string;
-  description: string;
-  is_deployed: number;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
+  ID: string;
+  NAME: string;
+  TYPE: string;
+  DESCRIPTION: string;
+  IS_DEPLOYED: number;
+  CREATED_BY: string | null;
+  CREATED_AT: string;
+  UPDATED_AT: string;
 }
 
-function assembleTemplate(row: TemplateRow) {
-  const db = getDb();
+async function assembleTemplate(row: TemplateRow) {
+  const catResult = await execute<CategoryRow>(
+    'SELECT * FROM categories WHERE template_id = :templateId ORDER BY sort_order',
+    { templateId: row.ID }
+  );
 
-  const categories = db
-    .prepare('SELECT * FROM categories WHERE template_id = ? ORDER BY sort_order')
-    .all(row.id) as CategoryRow[];
+  const categories = catResult.rows || [];
 
-  const categoriesWithParams = categories.map((cat) => {
-    const parameters = db
-      .prepare('SELECT * FROM judgment_parameters WHERE category_id = ? ORDER BY sort_order')
-      .all(cat.id) as ParameterRow[];
+  const categoriesWithParams = await Promise.all(
+    categories.map(async (cat) => {
+      const paramResult = await execute<ParameterRow>(
+        'SELECT * FROM judgment_parameters WHERE category_id = :categoryId ORDER BY sort_order',
+        { categoryId: cat.ID }
+      );
 
-    return {
-      id: cat.id,
-      name: cat.name,
-      parameters: parameters.map((p) => ({
-        id: p.id,
-        name: p.name,
-        weightage: p.weightage,
-        comment: p.comment,
-      })),
-    };
-  });
+      return {
+        id: cat.ID,
+        name: cat.NAME,
+        parameters: (paramResult.rows || []).map((p) => ({
+          id: p.ID,
+          name: p.NAME,
+          weightage: p.WEIGHTAGE,
+          comment: p.COMMENT,
+        })),
+      };
+    })
+  );
 
   return {
-    id: row.id,
-    name: row.name,
-    type: row.type,
-    description: row.description,
-    isDeployed: row.is_deployed === 1,
+    id: row.ID,
+    name: row.NAME,
+    type: row.TYPE,
+    description: row.DESCRIPTION,
+    isDeployed: row.IS_DEPLOYED === 1,
     categories: categoriesWithParams,
-    createdBy: row.created_by,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdBy: row.CREATED_BY,
+    createdAt: String(row.CREATED_AT),
+    updatedAt: String(row.UPDATED_AT),
   };
 }
 
@@ -85,28 +91,29 @@ function assembleTemplate(row: TemplateRow) {
 router.get(
   '/',
   validate(templateFiltersSchema, 'query'),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const { page, limit, type, deployed, search } = req.query as Record<string, string>;
-      const offset = (Number(page || 1) - 1) * Number(limit || 20);
+      const pageNum = Number(page || 1);
+      const limitNum = Number(limit || 20);
+      const offset = (pageNum - 1) * limitNum;
 
       let query = 'SELECT * FROM templates';
-      let countQuery = 'SELECT COUNT(*) as total FROM templates';
+      let countQuery = 'SELECT COUNT(*) AS TOTAL FROM templates';
       const conditions: string[] = [];
-      const params: (string | number)[] = [];
+      const binds: Record<string, string | number> = {};
 
       if (type) {
-        conditions.push('type = ?');
-        params.push(type);
+        conditions.push('type = :type');
+        binds.type = type;
       }
       if (deployed !== undefined) {
-        conditions.push('is_deployed = ?');
-        params.push(deployed === 'true' ? 1 : 0);
+        conditions.push('is_deployed = :deployed');
+        binds.deployed = deployed === 'true' ? 1 : 0;
       }
       if (search) {
-        conditions.push('(name LIKE ? OR description LIKE ?)');
-        params.push(`%${search}%`, `%${search}%`);
+        conditions.push('(name LIKE :search OR description LIKE :search)');
+        binds.search = `%${search}%`;
       }
 
       if (conditions.length > 0) {
@@ -115,20 +122,21 @@ router.get(
         countQuery += where;
       }
 
-      const countRow = db.prepare(countQuery).get(...params) as { total: number };
+      const countResult = await execute<{ TOTAL: number }>(countQuery, binds);
+      const total = countResult.rows?.[0]?.TOTAL ?? 0;
 
-      query += ' ORDER BY updated_at DESC LIMIT ? OFFSET ?';
-      const rows = db.prepare(query).all(...params, Number(limit || 20), offset) as TemplateRow[];
+      query += ' ORDER BY updated_at DESC OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY';
+      const rowResult = await execute<TemplateRow>(query, { ...binds, offset, limit: limitNum });
 
-      const templates = rows.map(assembleTemplate);
+      const templates = await Promise.all((rowResult.rows || []).map(assembleTemplate));
 
       res.json({
         templates,
         pagination: {
-          page: Number(page || 1),
-          limit: Number(limit || 20),
-          total: countRow.total,
-          totalPages: Math.ceil(countRow.total / Number(limit || 20)),
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages: Math.ceil(total / limitNum),
         },
       });
     } catch (error) {
@@ -139,19 +147,20 @@ router.get(
 );
 
 // GET /api/templates/:id — Get single template
-router.get('/:id', (req: Request, res: Response): void => {
+router.get('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
-    const db = getDb();
-    const row = db
-      .prepare('SELECT * FROM templates WHERE id = ?')
-      .get(req.params.id) as TemplateRow | undefined;
+    const result = await execute<TemplateRow>(
+      'SELECT * FROM templates WHERE id = :id',
+      { id: req.params.id }
+    );
 
+    const row = result.rows?.[0];
     if (!row) {
       res.status(404).json({ error: 'Template not found' });
       return;
     }
 
-    res.json({ template: assembleTemplate(row) });
+    res.json({ template: await assembleTemplate(row) });
   } catch (error) {
     logger.error({ error }, 'Failed to get template');
     res.status(500).json({ error: 'Internal server error' });
@@ -163,61 +172,63 @@ router.post(
   '/',
   authorize('admin'),
   validate(createTemplateSchema),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const input: CreateTemplateInput = req.body;
       const templateId = uuidv4();
 
-      const insertTemplate = db.prepare(
-        'INSERT INTO templates (id, name, type, description, is_deployed, created_by) VALUES (?, ?, ?, ?, ?, ?)'
-      );
-
-      const insertCategory = db.prepare(
-        'INSERT INTO categories (id, template_id, name, sort_order) VALUES (?, ?, ?, ?)'
-      );
-
-      const insertParameter = db.prepare(
-        'INSERT INTO judgment_parameters (id, category_id, name, weightage, comment, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
-      );
-
-      const transaction = db.transaction(() => {
-        insertTemplate.run(
-          templateId,
-          input.name,
-          input.type,
-          input.description,
-          input.isDeployed ? 1 : 0,
-          req.user!.userId
+      await transaction(async (conn) => {
+        await conn.execute(
+          `INSERT INTO templates (id, name, type, description, is_deployed, created_by)
+           VALUES (:id, :name, :type, :description, :isDeployed, :createdBy)`,
+          {
+            id: templateId,
+            name: input.name,
+            type: input.type,
+            description: input.description,
+            isDeployed: input.isDeployed ? 1 : 0,
+            createdBy: req.user!.userId,
+          }
         );
 
-        input.categories.forEach((cat, catIdx) => {
+        for (let catIdx = 0; catIdx < input.categories.length; catIdx++) {
+          const cat = input.categories[catIdx];
           const categoryId = cat.id || uuidv4();
-          insertCategory.run(categoryId, templateId, cat.name, catIdx);
 
-          cat.parameters.forEach((param, paramIdx) => {
-            const parameterId = param.id || uuidv4();
-            insertParameter.run(
-              parameterId,
-              categoryId,
-              param.name,
-              param.weightage,
-              param.comment,
-              paramIdx
+          await conn.execute(
+            `INSERT INTO categories (id, template_id, name, sort_order)
+             VALUES (:id, :templateId, :name, :sortOrder)`,
+            { id: categoryId, templateId, name: cat.name, sortOrder: catIdx }
+          );
+
+          for (let paramIdx = 0; paramIdx < cat.parameters.length; paramIdx++) {
+            const param = cat.parameters[paramIdx];
+            await conn.execute(
+              `INSERT INTO judgment_parameters (id, category_id, name, weightage, comment, sort_order)
+               VALUES (:id, :categoryId, :name, :weightage, :comment, :sortOrder)`,
+              {
+                id: param.id || uuidv4(),
+                categoryId,
+                name: param.name,
+                weightage: param.weightage,
+                comment: param.comment,
+                sortOrder: paramIdx,
+              }
             );
-          });
-        });
+          }
+        }
       });
 
-      transaction();
-
-      logAudit(req.user!.userId, 'CREATE', 'template', templateId, {
+      await logAudit(req.user!.userId, 'CREATE', 'template', templateId, {
         name: input.name,
         type: input.type,
       });
 
-      const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId) as TemplateRow;
-      res.status(201).json({ template: assembleTemplate(row) });
+      const result = await execute<TemplateRow>(
+        'SELECT * FROM templates WHERE id = :id',
+        { id: templateId }
+      );
+      res.status(201).json({ template: await assembleTemplate(result.rows![0]) });
     } catch (error) {
       logger.error({ error }, 'Failed to create template');
       res.status(500).json({ error: 'Internal server error' });
@@ -230,90 +241,96 @@ router.put(
   '/:id',
   authorize('admin'),
   validate(updateTemplateSchema),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const templateId = req.params.id;
 
-      const existing = db
-        .prepare('SELECT * FROM templates WHERE id = ?')
-        .get(templateId) as TemplateRow | undefined;
+      const existing = await execute<TemplateRow>(
+        'SELECT * FROM templates WHERE id = :id',
+        { id: templateId }
+      );
 
-      if (!existing) {
+      if (!existing.rows?.length) {
         res.status(404).json({ error: 'Template not found' });
         return;
       }
 
       const input = req.body;
 
-      const transaction = db.transaction(() => {
-        // Update template base fields
-        const updates: string[] = [];
-        const params: (string | number)[] = [];
+      await transaction(async (conn) => {
+        // Update base fields
+        const setClauses: string[] = [];
+        const binds: Record<string, string | number> = { templateId };
 
         if (input.name !== undefined) {
-          updates.push('name = ?');
-          params.push(input.name);
+          setClauses.push('name = :name');
+          binds.name = input.name;
         }
         if (input.type !== undefined) {
-          updates.push('type = ?');
-          params.push(input.type);
+          setClauses.push('type = :type');
+          binds.type = input.type;
         }
         if (input.description !== undefined) {
-          updates.push('description = ?');
-          params.push(input.description);
+          setClauses.push('description = :description');
+          binds.description = input.description;
         }
         if (input.isDeployed !== undefined) {
-          updates.push('is_deployed = ?');
-          params.push(input.isDeployed ? 1 : 0);
+          setClauses.push('is_deployed = :isDeployed');
+          binds.isDeployed = input.isDeployed ? 1 : 0;
         }
 
-        updates.push("updated_at = datetime('now')");
+        setClauses.push('updated_at = SYSTIMESTAMP');
 
-        if (updates.length > 0) {
-          params.push(templateId);
-          db.prepare(`UPDATE templates SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+        if (setClauses.length > 0) {
+          await conn.execute(
+            `UPDATE templates SET ${setClauses.join(', ')} WHERE id = :templateId`,
+            binds
+          );
         }
 
-        // Replace categories and parameters if provided
+        // Replace categories if provided
         if (input.categories) {
-          // Delete existing categories (cascade deletes parameters)
-          db.prepare('DELETE FROM categories WHERE template_id = ?').run(templateId);
-
-          const insertCategory = db.prepare(
-            'INSERT INTO categories (id, template_id, name, sort_order) VALUES (?, ?, ?, ?)'
-          );
-          const insertParameter = db.prepare(
-            'INSERT INTO judgment_parameters (id, category_id, name, weightage, comment, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
+          await conn.execute(
+            'DELETE FROM categories WHERE template_id = :templateId',
+            { templateId }
           );
 
-          input.categories.forEach(
-            (cat: { id?: string; name: string; parameters: Array<{ id?: string; name: string; weightage: number; comment: string }> }, catIdx: number) => {
-              const categoryId = cat.id || uuidv4();
-              insertCategory.run(categoryId, templateId, cat.name, catIdx);
+          for (let catIdx = 0; catIdx < input.categories.length; catIdx++) {
+            const cat = input.categories[catIdx];
+            const categoryId = cat.id || uuidv4();
 
-              cat.parameters.forEach((param, paramIdx) => {
-                const parameterId = param.id || uuidv4();
-                insertParameter.run(
-                  parameterId,
+            await conn.execute(
+              `INSERT INTO categories (id, template_id, name, sort_order)
+               VALUES (:id, :templateId, :name, :sortOrder)`,
+              { id: categoryId, templateId, name: cat.name, sortOrder: catIdx }
+            );
+
+            for (let paramIdx = 0; paramIdx < cat.parameters.length; paramIdx++) {
+              const param = cat.parameters[paramIdx];
+              await conn.execute(
+                `INSERT INTO judgment_parameters (id, category_id, name, weightage, comment, sort_order)
+                 VALUES (:id, :categoryId, :name, :weightage, :comment, :sortOrder)`,
+                {
+                  id: param.id || uuidv4(),
                   categoryId,
-                  param.name,
-                  param.weightage,
-                  param.comment,
-                  paramIdx
-                );
-              });
+                  name: param.name,
+                  weightage: param.weightage,
+                  comment: param.comment,
+                  sortOrder: paramIdx,
+                }
+              );
             }
-          );
+          }
         }
       });
 
-      transaction();
+      await logAudit(req.user!.userId, 'UPDATE', 'template', templateId);
 
-      logAudit(req.user!.userId, 'UPDATE', 'template', templateId);
-
-      const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId) as TemplateRow;
-      res.json({ template: assembleTemplate(row) });
+      const result = await execute<TemplateRow>(
+        'SELECT * FROM templates WHERE id = :id',
+        { id: templateId }
+      );
+      res.json({ template: await assembleTemplate(result.rows![0]) });
     } catch (error) {
       logger.error({ error }, 'Failed to update template');
       res.status(500).json({ error: 'Internal server error' });
@@ -325,36 +342,38 @@ router.put(
 router.delete(
   '/:id',
   authorize('admin'),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const templateId = req.params.id;
 
-      const existing = db
-        .prepare('SELECT id FROM templates WHERE id = ?')
-        .get(templateId);
+      const existing = await execute<{ ID: string }>(
+        'SELECT id FROM templates WHERE id = :id',
+        { id: templateId }
+      );
 
-      if (!existing) {
+      if (!existing.rows?.length) {
         res.status(404).json({ error: 'Template not found' });
         return;
       }
 
-      // Check if template is used by any DA sheets
-      const usedBy = db
-        .prepare('SELECT COUNT(*) as count FROM da_sheets WHERE template_id = ?')
-        .get(templateId) as { count: number };
+      const usedBy = await execute<{ CNT: number }>(
+        'SELECT COUNT(*) AS CNT FROM da_sheets WHERE template_id = :templateId',
+        { templateId }
+      );
 
-      if (usedBy.count > 0) {
+      if ((usedBy.rows?.[0]?.CNT ?? 0) > 0) {
         res.status(409).json({
           error: 'Cannot delete template that is in use by DA sheets',
-          sheetsCount: usedBy.count,
+          sheetsCount: usedBy.rows![0].CNT,
         });
         return;
       }
 
-      db.prepare('DELETE FROM templates WHERE id = ?').run(templateId);
+      await transaction(async (conn) => {
+        await conn.execute('DELETE FROM templates WHERE id = :id', { id: templateId });
+      });
 
-      logAudit(req.user!.userId, 'DELETE', 'template', templateId);
+      await logAudit(req.user!.userId, 'DELETE', 'template', templateId);
 
       res.json({ message: 'Template deleted' });
     } catch (error) {
@@ -364,35 +383,41 @@ router.delete(
   }
 );
 
-// POST /api/templates/:id/publish — Publish/unpublish template
+// POST /api/templates/:id/publish — Toggle publish/unpublish
 router.post(
   '/:id/publish',
   authorize('admin'),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const templateId = req.params.id;
 
-      const existing = db
-        .prepare('SELECT * FROM templates WHERE id = ?')
-        .get(templateId) as TemplateRow | undefined;
+      const existing = await execute<TemplateRow>(
+        'SELECT * FROM templates WHERE id = :id',
+        { id: templateId }
+      );
 
-      if (!existing) {
+      if (!existing.rows?.length) {
         res.status(404).json({ error: 'Template not found' });
         return;
       }
 
-      const newStatus = existing.is_deployed ? 0 : 1;
-      db.prepare("UPDATE templates SET is_deployed = ?, updated_at = datetime('now') WHERE id = ?").run(
-        newStatus,
-        templateId
-      );
+      const newStatus = existing.rows[0].IS_DEPLOYED ? 0 : 1;
+
+      await transaction(async (conn) => {
+        await conn.execute(
+          'UPDATE templates SET is_deployed = :newStatus, updated_at = SYSTIMESTAMP WHERE id = :id',
+          { newStatus, id: templateId }
+        );
+      });
 
       const action = newStatus ? 'PUBLISH' : 'UNPUBLISH';
-      logAudit(req.user!.userId, action, 'template', templateId);
+      await logAudit(req.user!.userId, action, 'template', templateId);
 
-      const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId) as TemplateRow;
-      res.json({ template: assembleTemplate(row) });
+      const result = await execute<TemplateRow>(
+        'SELECT * FROM templates WHERE id = :id',
+        { id: templateId }
+      );
+      res.json({ template: await assembleTemplate(result.rows![0]) });
     } catch (error) {
       logger.error({ error }, 'Failed to toggle template publish status');
       res.status(500).json({ error: 'Internal server error' });

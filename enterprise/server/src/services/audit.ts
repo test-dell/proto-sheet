@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { getDb } from '../db/index.js';
+import { executeWithCommit, execute } from '../db/index.js';
 import logger from '../utils/logger.js';
 
 export type EntityType = 'user' | 'template' | 'da_sheet' | 'vendor';
@@ -18,24 +18,25 @@ export type AuditAction =
   | 'APPROVE'
   | 'DUPLICATE';
 
-export function logAudit(
+export async function logAudit(
   userId: string | null,
   action: AuditAction,
   entityType: EntityType,
   entityId: string,
   details?: Record<string, unknown>
-): void {
+): Promise<void> {
   try {
-    const db = getDb();
-    db.prepare(
-      'INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(
-      uuidv4(),
-      userId,
-      action,
-      entityType,
-      entityId,
-      details ? JSON.stringify(details) : null
+    await executeWithCommit(
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES (:id, :userId, :action, :entityType, :entityId, :details)`,
+      {
+        id: uuidv4(),
+        userId: userId ?? null,
+        action,
+        entityType,
+        entityId,
+        details: details ? JSON.stringify(details) : null,
+      }
     );
   } catch (error) {
     logger.error({ error, action, entityType, entityId }, 'Failed to write audit log');
@@ -52,50 +53,52 @@ export interface AuditEntry {
   createdAt: string;
 }
 
-export function getAuditLog(
+interface AuditRow {
+  ID: string;
+  USER_ID: string | null;
+  ACTION: string;
+  ENTITY_TYPE: string;
+  ENTITY_ID: string;
+  DETAILS: string | null;
+  CREATED_AT: string;
+}
+
+export async function getAuditLog(
   entityType?: string,
   entityId?: string,
   limit = 50,
   offset = 0
-): AuditEntry[] {
-  const db = getDb();
+): Promise<AuditEntry[]> {
   let query = 'SELECT * FROM audit_log';
-  const params: (string | number)[] = [];
+  const binds: Record<string, string | number> = {};
 
   const conditions: string[] = [];
   if (entityType) {
-    conditions.push('entity_type = ?');
-    params.push(entityType);
+    conditions.push('entity_type = :entityType');
+    binds.entityType = entityType;
   }
   if (entityId) {
-    conditions.push('entity_id = ?');
-    params.push(entityId);
+    conditions.push('entity_id = :entityId');
+    binds.entityId = entityId;
   }
 
   if (conditions.length > 0) {
     query += ' WHERE ' + conditions.join(' AND ');
   }
 
-  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-  params.push(limit, offset);
+  query += ' ORDER BY created_at DESC OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY';
+  binds.offset = offset;
+  binds.limit = limit;
 
-  const rows = db.prepare(query).all(...params) as Array<{
-    id: string;
-    user_id: string | null;
-    action: string;
-    entity_type: string;
-    entity_id: string;
-    details: string | null;
-    created_at: string;
-  }>;
+  const result = await execute<AuditRow>(query, binds);
 
-  return rows.map((row) => ({
-    id: row.id,
-    userId: row.user_id,
-    action: row.action,
-    entityType: row.entity_type,
-    entityId: row.entity_id,
-    details: row.details ? JSON.parse(row.details) : null,
-    createdAt: row.created_at,
+  return (result.rows || []).map((row) => ({
+    id: row.ID,
+    userId: row.USER_ID,
+    action: row.ACTION,
+    entityType: row.ENTITY_TYPE,
+    entityId: row.ENTITY_ID,
+    details: row.DETAILS ? JSON.parse(row.DETAILS) : null,
+    createdAt: String(row.CREATED_AT),
   }));
 }

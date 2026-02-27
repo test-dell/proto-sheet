@@ -4,8 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { apiLimiter } from './middleware/rateLimiter.js';
-import { closeDb } from './db/index.js';
-import { initializeDatabase } from './db/schema.js';
+import { initializeDatabase, closePool } from './db/index.js';
 import authRoutes from './routes/auth.js';
 import templateRoutes from './routes/templates.js';
 import sheetRoutes from './routes/sheets.js';
@@ -53,9 +52,6 @@ app.use((req, _res, next) => {
   next();
 });
 
-// ─── Initialize Database ─────────────────────────────────────────
-initializeDatabase(process.env.DATABASE_URL);
-
 // ─── API Routes ──────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/templates', templateRoutes);
@@ -80,22 +76,31 @@ app.use(
 );
 
 // ─── Graceful Shutdown ───────────────────────────────────────────
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down...');
-  closeDb();
+async function shutdown(signal: string) {
+  logger.info(`${signal} received, shutting down...`);
+  await closePool();
   process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down...');
-  closeDb();
-  process.exit(0);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ─── Start Server ────────────────────────────────────────────────
-app.listen(PORT, () => {
-  logger.info(`Server running on http://localhost:${PORT}`);
-  logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+async function start() {
+  try {
+    await initializeDatabase();
+    logger.info('Oracle database connection pool ready');
+
+    app.listen(PORT, () => {
+      logger.info(`Server running on http://localhost:${PORT}`);
+      logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+  } catch (error) {
+    logger.error({ error }, 'Failed to start server');
+    process.exit(1);
+  }
+}
+
+start();
 
 export default app;

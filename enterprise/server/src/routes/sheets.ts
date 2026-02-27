@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb } from '../db/index.js';
+import { getConnection, transaction, execute } from '../db/index.js';
 import { authenticate } from '../middleware/auth.js';
 import { validate } from '../middleware/validation.js';
 import {
@@ -18,183 +18,178 @@ const router = Router();
 router.use(authenticate);
 
 interface SheetRow {
-  id: string;
-  name: string;
-  type: string;
-  status: string;
-  template_id: string;
-  notes: string;
-  version: number;
-  created_by: string;
-  approved_by: string | null;
-  approved_at: string | null;
-  created_at: string;
-  updated_at: string;
+  ID: string;
+  NAME: string;
+  TYPE: string;
+  STATUS: string;
+  TEMPLATE_ID: string;
+  NOTES: string;
+  VERSION: number;
+  CREATED_BY: string;
+  APPROVED_BY: string | null;
+  APPROVED_AT: string | null;
+  CREATED_AT: string;
+  UPDATED_AT: string;
 }
 
 interface VendorRow {
-  id: string;
-  da_sheet_id: string;
-  name: string;
-  overall_score: number;
-  notes: string;
-  sort_order: number;
+  ID: string;
+  DA_SHEET_ID: string;
+  NAME: string;
+  OVERALL_SCORE: number;
+  NOTES: string;
+  SORT_ORDER: number;
 }
 
 interface EvaluationRow {
-  id: string;
-  vendor_id: string;
-  category_id: string;
-  parameter_id: string;
-  eval_score: number;
-  result: number;
-  vendor_comment: string;
+  ID: string;
+  VENDOR_ID: string;
+  CATEGORY_ID: string;
+  PARAMETER_ID: string;
+  EVAL_SCORE: number;
+  RESULT: number;
+  VENDOR_COMMENT: string;
 }
 
 interface SharedAccessRow {
-  id: string;
-  da_sheet_id: string;
-  user_email: string;
-  access_level: string;
-  shared_at: string;
+  ID: string;
+  DA_SHEET_ID: string;
+  USER_EMAIL: string;
+  ACCESS_LEVEL: string;
+  SHARED_AT: string;
 }
 
-function assembleSheet(row: SheetRow) {
-  const db = getDb();
+async function assembleSheet(row: SheetRow) {
+  const vendorResult = await execute<VendorRow>(
+    'SELECT * FROM vendors WHERE da_sheet_id = :sheetId ORDER BY sort_order',
+    { sheetId: row.ID }
+  );
 
-  const vendorRows = db
-    .prepare('SELECT * FROM vendors WHERE da_sheet_id = ? ORDER BY sort_order')
-    .all(row.id) as VendorRow[];
+  const vendors = await Promise.all(
+    (vendorResult.rows || []).map(async (v) => {
+      const evalResult = await execute<EvaluationRow>(
+        'SELECT * FROM vendor_evaluations WHERE vendor_id = :vendorId',
+        { vendorId: v.ID }
+      );
 
-  const vendors = vendorRows.map((v) => {
-    const evaluations = db
-      .prepare('SELECT * FROM vendor_evaluations WHERE vendor_id = ?')
-      .all(v.id) as EvaluationRow[];
+      const scores: Record<string, { evaluations: Array<{ parameterId: string; evalScore: number; result: number; vendorComment: string }>; subTotal: number }> = {};
 
-    // Group evaluations by category
-    const scores: Record<string, { evaluations: Array<{ parameterId: string; evalScore: number; result: number; vendorComment: string }>; subTotal: number }> = {};
-
-    for (const eval_ of evaluations) {
-      if (!scores[eval_.category_id]) {
-        scores[eval_.category_id] = { evaluations: [], subTotal: 0 };
+      for (const eval_ of evalResult.rows || []) {
+        if (!scores[eval_.CATEGORY_ID]) {
+          scores[eval_.CATEGORY_ID] = { evaluations: [], subTotal: 0 };
+        }
+        scores[eval_.CATEGORY_ID].evaluations.push({
+          parameterId: eval_.PARAMETER_ID,
+          evalScore: eval_.EVAL_SCORE,
+          result: eval_.RESULT,
+          vendorComment: eval_.VENDOR_COMMENT,
+        });
+        scores[eval_.CATEGORY_ID].subTotal += eval_.RESULT;
       }
-      scores[eval_.category_id].evaluations.push({
-        parameterId: eval_.parameter_id,
-        evalScore: eval_.eval_score,
-        result: eval_.result,
-        vendorComment: eval_.vendor_comment,
-      });
-      scores[eval_.category_id].subTotal += eval_.result;
-    }
 
-    return {
-      id: v.id,
-      name: v.name,
-      scores,
-      overallScore: v.overall_score,
-      notes: v.notes,
-    };
-  });
+      return {
+        id: v.ID,
+        name: v.NAME,
+        scores,
+        overallScore: v.OVERALL_SCORE,
+        notes: v.NOTES,
+      };
+    })
+  );
 
-  const sharedAccess = db
-    .prepare('SELECT * FROM shared_access WHERE da_sheet_id = ?')
-    .all(row.id) as SharedAccessRow[];
+  const saResult = await execute<SharedAccessRow>(
+    'SELECT * FROM shared_access WHERE da_sheet_id = :sheetId',
+    { sheetId: row.ID }
+  );
 
   return {
-    id: row.id,
-    name: row.name,
-    type: row.type,
-    status: row.status,
-    templateId: row.template_id,
+    id: row.ID,
+    name: row.NAME,
+    type: row.TYPE,
+    status: row.STATUS,
+    templateId: row.TEMPLATE_ID,
     vendors,
-    notes: row.notes,
-    version: row.version,
-    createdBy: row.created_by,
-    approvedBy: row.approved_by,
-    approvedAt: row.approved_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    sharedWith: sharedAccess.map((sa) => ({
-      email: sa.user_email,
-      accessLevel: sa.access_level,
-      sharedAt: sa.shared_at,
+    notes: row.NOTES,
+    version: row.VERSION,
+    createdBy: row.CREATED_BY,
+    approvedBy: row.APPROVED_BY,
+    approvedAt: row.APPROVED_AT ? String(row.APPROVED_AT) : null,
+    createdAt: String(row.CREATED_AT),
+    updatedAt: String(row.UPDATED_AT),
+    sharedWith: (saResult.rows || []).map((sa) => ({
+      email: sa.USER_EMAIL,
+      accessLevel: sa.ACCESS_LEVEL,
+      sharedAt: String(sa.SHARED_AT),
     })),
   };
 }
 
-/**
- * Check if user has access to a sheet (owner or shared).
- */
-function hasAccess(
+async function hasAccess(
   sheetId: string,
   userId: string,
   requiredLevel?: 'edit'
-): boolean {
-  const db = getDb();
+): Promise<boolean> {
+  const sheet = await execute<{ CREATED_BY: string }>(
+    'SELECT created_by FROM da_sheets WHERE id = :id',
+    { id: sheetId }
+  );
 
-  // Check ownership
-  const sheet = db
-    .prepare('SELECT created_by FROM da_sheets WHERE id = ?')
-    .get(sheetId) as { created_by: string } | undefined;
+  if (!sheet.rows?.length) return false;
+  if (sheet.rows[0].CREATED_BY === userId) return true;
 
-  if (!sheet) return false;
-  if (sheet.created_by === userId) return true;
+  const user = await execute<{ EMAIL: string }>(
+    'SELECT email FROM users WHERE id = :id',
+    { id: userId }
+  );
+  if (!user.rows?.length) return false;
 
-  // Check shared access
-  const user = db
-    .prepare('SELECT email FROM users WHERE id = ?')
-    .get(userId) as { email: string } | undefined;
+  const access = await execute<{ ACCESS_LEVEL: string }>(
+    'SELECT access_level FROM shared_access WHERE da_sheet_id = :sheetId AND user_email = :email',
+    { sheetId, email: user.rows[0].EMAIL }
+  );
 
-  if (!user) return false;
-
-  const access = db
-    .prepare('SELECT access_level FROM shared_access WHERE da_sheet_id = ? AND user_email = ?')
-    .get(sheetId, user.email) as { access_level: string } | undefined;
-
-  if (!access) return false;
-  if (requiredLevel === 'edit' && access.access_level !== 'edit') return false;
+  if (!access.rows?.length) return false;
+  if (requiredLevel === 'edit' && access.rows[0].ACCESS_LEVEL !== 'edit') return false;
 
   return true;
 }
 
-// GET /api/sheets — List DA sheets
+// GET /api/sheets
 router.get(
   '/',
   validate(sheetFiltersSchema, 'query'),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const { page, limit, type, status, search } = req.query as Record<string, string>;
       const userId = req.user!.userId;
       const userRole = req.user!.role;
-      const offset = (Number(page || 1) - 1) * Number(limit || 20);
+      const pageNum = Number(page || 1);
+      const limitNum = Number(limit || 20);
+      const offset = (pageNum - 1) * limitNum;
 
       let query = 'SELECT DISTINCT s.* FROM da_sheets s';
-      let countQuery = 'SELECT COUNT(DISTINCT s.id) as total FROM da_sheets s';
+      let countQuery = 'SELECT COUNT(DISTINCT s.id) AS TOTAL FROM da_sheets s';
       const conditions: string[] = [];
-      const params: (string | number)[] = [];
+      const binds: Record<string, string | number> = {};
 
-      // Non-admin users only see their own sheets or sheets shared with them
       if (userRole !== 'admin') {
-        query +=
-          ' LEFT JOIN shared_access sa ON s.id = sa.da_sheet_id LEFT JOIN users u ON sa.user_email = u.email';
-        countQuery +=
-          ' LEFT JOIN shared_access sa ON s.id = sa.da_sheet_id LEFT JOIN users u ON sa.user_email = u.email';
-        conditions.push('(s.created_by = ? OR u.id = ?)');
-        params.push(userId, userId);
+        query += ' LEFT JOIN shared_access sa ON s.id = sa.da_sheet_id LEFT JOIN users u ON sa.user_email = u.email';
+        countQuery += ' LEFT JOIN shared_access sa ON s.id = sa.da_sheet_id LEFT JOIN users u ON sa.user_email = u.email';
+        conditions.push('(s.created_by = :userId OR u.id = :userId)');
+        binds.userId = userId;
       }
 
       if (type) {
-        conditions.push('s.type = ?');
-        params.push(type);
+        conditions.push('s.type = :type');
+        binds.type = type;
       }
       if (status) {
-        conditions.push('s.status = ?');
-        params.push(status);
+        conditions.push('s.status = :status');
+        binds.status = status;
       }
       if (search) {
-        conditions.push('(s.name LIKE ?)');
-        params.push(`%${search}%`);
+        conditions.push('s.name LIKE :search');
+        binds.search = `%${search}%`;
       }
 
       if (conditions.length > 0) {
@@ -203,21 +198,17 @@ router.get(
         countQuery += where;
       }
 
-      const countRow = db.prepare(countQuery).get(...params) as { total: number };
+      const countResult = await execute<{ TOTAL: number }>(countQuery, binds);
+      const total = countResult.rows?.[0]?.TOTAL ?? 0;
 
-      query += ' ORDER BY s.updated_at DESC LIMIT ? OFFSET ?';
-      const rows = db.prepare(query).all(...params, Number(limit || 20), offset) as SheetRow[];
+      query += ' ORDER BY s.updated_at DESC OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY';
+      const rowResult = await execute<SheetRow>(query, { ...binds, offset, limit: limitNum });
 
-      const sheets = rows.map(assembleSheet);
+      const sheets = await Promise.all((rowResult.rows || []).map(assembleSheet));
 
       res.json({
         sheets,
-        pagination: {
-          page: Number(page || 1),
-          limit: Number(limit || 20),
-          total: countRow.total,
-          totalPages: Math.ceil(countRow.total / Number(limit || 20)),
-        },
+        pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) },
       });
     } catch (error) {
       logger.error({ error }, 'Failed to list DA sheets');
@@ -226,98 +217,91 @@ router.get(
   }
 );
 
-// GET /api/sheets/:id — Get single sheet
-router.get('/:id', (req: Request, res: Response): void => {
+// GET /api/sheets/:id
+router.get('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
-    const db = getDb();
     const sheetId = req.params.id;
 
-    if (!hasAccess(sheetId, req.user!.userId) && req.user!.role !== 'admin') {
+    if (!(await hasAccess(sheetId, req.user!.userId)) && req.user!.role !== 'admin') {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
 
-    const row = db
-      .prepare('SELECT * FROM da_sheets WHERE id = ?')
-      .get(sheetId) as SheetRow | undefined;
+    const result = await execute<SheetRow>(
+      'SELECT * FROM da_sheets WHERE id = :id',
+      { id: sheetId }
+    );
 
-    if (!row) {
+    if (!result.rows?.length) {
       res.status(404).json({ error: 'DA Sheet not found' });
       return;
     }
 
-    res.json({ sheet: assembleSheet(row) });
+    res.json({ sheet: await assembleSheet(result.rows[0]) });
   } catch (error) {
     logger.error({ error }, 'Failed to get DA sheet');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/sheets — Create DA sheet
+// POST /api/sheets
 router.post(
   '/',
   validate(createDASheetSchema),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const input: CreateDASheetInput = req.body;
       const sheetId = uuidv4();
       const userId = req.user!.userId;
 
-      // Verify template exists
-      const template = db
-        .prepare('SELECT id FROM templates WHERE id = ?')
-        .get(input.templateId);
-
-      if (!template) {
+      const template = await execute<{ ID: string }>(
+        'SELECT id FROM templates WHERE id = :id',
+        { id: input.templateId }
+      );
+      if (!template.rows?.length) {
         res.status(400).json({ error: 'Template not found' });
         return;
       }
 
-      const transaction = db.transaction(() => {
-        db.prepare(
-          'INSERT INTO da_sheets (id, name, type, template_id, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(sheetId, input.name, input.type, input.templateId, input.notes, userId);
+      await transaction(async (conn) => {
+        await conn.execute(
+          `INSERT INTO da_sheets (id, name, type, template_id, notes, created_by)
+           VALUES (:id, :name, :type, :templateId, :notes, :createdBy)`,
+          { id: sheetId, name: input.name, type: input.type, templateId: input.templateId, notes: input.notes, createdBy: userId }
+        );
 
-        // Insert vendors if provided
         for (let i = 0; i < input.vendors.length; i++) {
           const vendor = input.vendors[i];
           const vendorId = vendor.id || uuidv4();
 
-          db.prepare(
-            'INSERT INTO vendors (id, da_sheet_id, name, overall_score, notes, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
-          ).run(vendorId, sheetId, vendor.name, vendor.overallScore, vendor.notes, i);
+          await conn.execute(
+            `INSERT INTO vendors (id, da_sheet_id, name, overall_score, notes, sort_order)
+             VALUES (:id, :sheetId, :name, :overallScore, :notes, :sortOrder)`,
+            { id: vendorId, sheetId, name: vendor.name, overallScore: vendor.overallScore, notes: vendor.notes, sortOrder: i }
+          );
 
-          // Insert evaluations
           for (const [categoryId, categoryData] of Object.entries(vendor.scores)) {
             for (const evaluation of categoryData.evaluations) {
-              db.prepare(
-                'INSERT INTO vendor_evaluations (id, vendor_id, category_id, parameter_id, eval_score, result, vendor_comment) VALUES (?, ?, ?, ?, ?, ?, ?)'
-              ).run(
-                uuidv4(),
-                vendorId,
-                categoryId,
-                evaluation.parameterId,
-                evaluation.evalScore,
-                evaluation.result,
-                evaluation.vendorComment
+              await conn.execute(
+                `INSERT INTO vendor_evaluations (id, vendor_id, category_id, parameter_id, eval_score, result, vendor_comment)
+                 VALUES (:id, :vendorId, :categoryId, :parameterId, :evalScore, :result, :vendorComment)`,
+                {
+                  id: uuidv4(), vendorId, categoryId,
+                  parameterId: evaluation.parameterId,
+                  evalScore: evaluation.evalScore,
+                  result: evaluation.result,
+                  vendorComment: evaluation.vendorComment,
+                }
               );
             }
           }
         }
       });
 
-      transaction();
+      await logAudit(userId, 'CREATE', 'da_sheet', sheetId, { name: input.name, type: input.type });
 
-      logAudit(userId, 'CREATE', 'da_sheet', sheetId, {
-        name: input.name,
-        type: input.type,
-      });
-
-      const row = db
-        .prepare('SELECT * FROM da_sheets WHERE id = ?')
-        .get(sheetId) as SheetRow;
-      res.status(201).json({ sheet: assembleSheet(row) });
+      const result = await execute<SheetRow>('SELECT * FROM da_sheets WHERE id = :id', { id: sheetId });
+      res.status(201).json({ sheet: await assembleSheet(result.rows![0]) });
     } catch (error) {
       logger.error({ error }, 'Failed to create DA sheet');
       res.status(500).json({ error: 'Internal server error' });
@@ -325,83 +309,70 @@ router.post(
   }
 );
 
-// PUT /api/sheets/:id — Update DA sheet
+// PUT /api/sheets/:id
 router.put(
   '/:id',
   validate(updateDASheetSchema),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const sheetId = req.params.id;
       const userId = req.user!.userId;
 
-      if (!hasAccess(sheetId, userId, 'edit') && req.user!.role !== 'admin') {
+      if (!(await hasAccess(sheetId, userId, 'edit')) && req.user!.role !== 'admin') {
         res.status(403).json({ error: 'Access denied' });
         return;
       }
 
-      const existing = db
-        .prepare('SELECT * FROM da_sheets WHERE id = ?')
-        .get(sheetId) as SheetRow | undefined;
-
-      if (!existing) {
+      const existing = await execute<SheetRow>('SELECT * FROM da_sheets WHERE id = :id', { id: sheetId });
+      if (!existing.rows?.length) {
         res.status(404).json({ error: 'DA Sheet not found' });
         return;
       }
 
-      // Optimistic locking: check version
       const input: UpdateDASheetInput = req.body;
 
-      const transaction = db.transaction(() => {
-        const updates: string[] = [];
-        const params: (string | number)[] = [];
+      await transaction(async (conn) => {
+        const setClauses: string[] = [];
+        const binds: Record<string, string | number> = { sheetId };
 
-        if (input.name !== undefined) {
-          updates.push('name = ?');
-          params.push(input.name);
-        }
-        if (input.status !== undefined) {
-          updates.push('status = ?');
-          params.push(input.status);
-        }
-        if (input.notes !== undefined) {
-          updates.push('notes = ?');
-          params.push(input.notes);
-        }
+        if (input.name !== undefined) { setClauses.push('name = :name'); binds.name = input.name; }
+        if (input.status !== undefined) { setClauses.push('status = :status'); binds.status = input.status; }
+        if (input.notes !== undefined) { setClauses.push('notes = :notes'); binds.notes = input.notes; }
 
-        // Increment version
-        updates.push('version = version + 1');
-        updates.push("updated_at = datetime('now')");
+        setClauses.push('version = version + 1');
+        setClauses.push('updated_at = SYSTIMESTAMP');
 
-        params.push(sheetId);
-        db.prepare(`UPDATE da_sheets SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+        await conn.execute(
+          `UPDATE da_sheets SET ${setClauses.join(', ')} WHERE id = :sheetId`,
+          binds
+        );
 
-        // Replace vendors if provided
         if (input.vendors) {
-          // Delete existing vendors (cascade deletes evaluations)
-          db.prepare('DELETE FROM vendors WHERE da_sheet_id = ?').run(sheetId);
+          await conn.execute('DELETE FROM vendors WHERE da_sheet_id = :sheetId', { sheetId });
 
           for (let i = 0; i < input.vendors.length; i++) {
             const vendor = input.vendors[i];
             const vendorId = vendor.id || uuidv4();
 
-            db.prepare(
-              'INSERT INTO vendors (id, da_sheet_id, name, overall_score, notes, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
-            ).run(vendorId, sheetId, vendor.name, vendor.overallScore, vendor.notes, i);
+            await conn.execute(
+              `INSERT INTO vendors (id, da_sheet_id, name, overall_score, notes, sort_order)
+               VALUES (:id, :sheetId, :name, :overallScore, :notes, :sortOrder)`,
+              { id: vendorId, sheetId, name: vendor.name, overallScore: vendor.overallScore, notes: vendor.notes, sortOrder: i }
+            );
 
             if (vendor.scores) {
               for (const [categoryId, categoryData] of Object.entries(vendor.scores)) {
                 for (const evaluation of categoryData.evaluations) {
-                  db.prepare(
-                    'INSERT INTO vendor_evaluations (id, vendor_id, category_id, parameter_id, eval_score, result, vendor_comment) VALUES (?, ?, ?, ?, ?, ?, ?)'
-                  ).run(
-                    uuidv4(),
-                    vendorId,
-                    categoryId,
-                    evaluation.parameterId,
-                    evaluation.evalScore,
-                    evaluation.result,
-                    evaluation.vendorComment
+                  await conn.execute(
+                    `INSERT INTO vendor_evaluations (id, vendor_id, category_id, parameter_id, eval_score, result, vendor_comment)
+                     VALUES (:id, :vendorId, :categoryId, :parameterId, :evalScore, :result, :vendorComment)`,
+                    {
+                      id: uuidv4(), vendorId, categoryId,
+                      parameterId: evaluation.parameterId,
+                      evalScore: evaluation.evalScore,
+                      result: evaluation.result,
+                      vendorComment: evaluation.vendorComment,
+                    }
                   );
                 }
               }
@@ -410,14 +381,10 @@ router.put(
         }
       });
 
-      transaction();
+      await logAudit(userId, 'UPDATE', 'da_sheet', sheetId);
 
-      logAudit(userId, 'UPDATE', 'da_sheet', sheetId);
-
-      const row = db
-        .prepare('SELECT * FROM da_sheets WHERE id = ?')
-        .get(sheetId) as SheetRow;
-      res.json({ sheet: assembleSheet(row) });
+      const result = await execute<SheetRow>('SELECT * FROM da_sheets WHERE id = :id', { id: sheetId });
+      res.json({ sheet: await assembleSheet(result.rows![0]) });
     } catch (error) {
       logger.error({ error }, 'Failed to update DA sheet');
       res.status(500).json({ error: 'Internal server error' });
@@ -425,32 +392,30 @@ router.put(
   }
 );
 
-// DELETE /api/sheets/:id — Delete DA sheet
-router.delete('/:id', (req: Request, res: Response): void => {
+// DELETE /api/sheets/:id
+router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
-    const db = getDb();
     const sheetId = req.params.id;
     const userId = req.user!.userId;
 
-    const existing = db
-      .prepare('SELECT created_by FROM da_sheets WHERE id = ?')
-      .get(sheetId) as { created_by: string } | undefined;
-
-    if (!existing) {
+    const existing = await execute<{ CREATED_BY: string }>(
+      'SELECT created_by FROM da_sheets WHERE id = :id', { id: sheetId }
+    );
+    if (!existing.rows?.length) {
       res.status(404).json({ error: 'DA Sheet not found' });
       return;
     }
 
-    // Only owner or admin can delete
-    if (existing.created_by !== userId && req.user!.role !== 'admin') {
+    if (existing.rows[0].CREATED_BY !== userId && req.user!.role !== 'admin') {
       res.status(403).json({ error: 'Only the owner or admin can delete this sheet' });
       return;
     }
 
-    db.prepare('DELETE FROM da_sheets WHERE id = ?').run(sheetId);
+    await transaction(async (conn) => {
+      await conn.execute('DELETE FROM da_sheets WHERE id = :id', { id: sheetId });
+    });
 
-    logAudit(userId, 'DELETE', 'da_sheet', sheetId);
-
+    await logAudit(userId, 'DELETE', 'da_sheet', sheetId);
     res.json({ message: 'DA Sheet deleted' });
   } catch (error) {
     logger.error({ error }, 'Failed to delete DA sheet');
@@ -458,118 +423,107 @@ router.delete('/:id', (req: Request, res: Response): void => {
   }
 });
 
-// POST /api/sheets/:id/duplicate — Duplicate a DA sheet
-router.post('/:id/duplicate', (req: Request, res: Response): void => {
+// POST /api/sheets/:id/duplicate
+router.post('/:id/duplicate', async (req: Request, res: Response): Promise<void> => {
   try {
-    const db = getDb();
     const sheetId = req.params.id;
     const userId = req.user!.userId;
 
-    if (!hasAccess(sheetId, userId) && req.user!.role !== 'admin') {
+    if (!(await hasAccess(sheetId, userId)) && req.user!.role !== 'admin') {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
 
-    const original = db
-      .prepare('SELECT * FROM da_sheets WHERE id = ?')
-      .get(sheetId) as SheetRow | undefined;
-
-    if (!original) {
+    const original = await execute<SheetRow>('SELECT * FROM da_sheets WHERE id = :id', { id: sheetId });
+    if (!original.rows?.length) {
       res.status(404).json({ error: 'DA Sheet not found' });
       return;
     }
 
+    const orig = original.rows[0];
     const newSheetId = uuidv4();
 
-    const transaction = db.transaction(() => {
-      db.prepare(
-        'INSERT INTO da_sheets (id, name, type, status, template_id, notes, version, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(
-        newSheetId,
-        `${original.name} (Copy)`,
-        original.type,
-        'Draft',
-        original.template_id,
-        original.notes,
-        1,
-        userId
+    await transaction(async (conn) => {
+      await conn.execute(
+        `INSERT INTO da_sheets (id, name, type, status, template_id, notes, version, created_by)
+         VALUES (:id, :name, :type, 'Draft', :templateId, :notes, 1, :createdBy)`,
+        { id: newSheetId, name: `${orig.NAME} (Copy)`, type: orig.TYPE, templateId: orig.TEMPLATE_ID, notes: orig.NOTES, createdBy: userId }
       );
 
-      // Copy vendors
-      const vendors = db
-        .prepare('SELECT * FROM vendors WHERE da_sheet_id = ? ORDER BY sort_order')
-        .all(sheetId) as VendorRow[];
+      const vendors = await conn.execute<VendorRow>(
+        'SELECT * FROM vendors WHERE da_sheet_id = :sheetId ORDER BY sort_order',
+        { sheetId }
+      );
 
-      for (const vendor of vendors) {
+      for (const vendor of vendors.rows || []) {
         const newVendorId = uuidv4();
-        db.prepare(
-          'INSERT INTO vendors (id, da_sheet_id, name, overall_score, notes, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(newVendorId, newSheetId, vendor.name, vendor.overall_score, vendor.notes, vendor.sort_order);
+        await conn.execute(
+          `INSERT INTO vendors (id, da_sheet_id, name, overall_score, notes, sort_order)
+           VALUES (:id, :sheetId, :name, :score, :notes, :sortOrder)`,
+          { id: newVendorId, sheetId: newSheetId, name: vendor.NAME, score: vendor.OVERALL_SCORE, notes: vendor.NOTES, sortOrder: vendor.SORT_ORDER }
+        );
 
-        // Copy evaluations
-        const evaluations = db
-          .prepare('SELECT * FROM vendor_evaluations WHERE vendor_id = ?')
-          .all(vendor.id) as EvaluationRow[];
-
-        for (const eval_ of evaluations) {
-          db.prepare(
-            'INSERT INTO vendor_evaluations (id, vendor_id, category_id, parameter_id, eval_score, result, vendor_comment) VALUES (?, ?, ?, ?, ?, ?, ?)'
-          ).run(uuidv4(), newVendorId, eval_.category_id, eval_.parameter_id, eval_.eval_score, eval_.result, eval_.vendor_comment);
+        const evals = await conn.execute<EvaluationRow>(
+          'SELECT * FROM vendor_evaluations WHERE vendor_id = :vendorId',
+          { vendorId: vendor.ID }
+        );
+        for (const ev of evals.rows || []) {
+          await conn.execute(
+            `INSERT INTO vendor_evaluations (id, vendor_id, category_id, parameter_id, eval_score, result, vendor_comment)
+             VALUES (:id, :vendorId, :catId, :paramId, :evalScore, :result, :comment)`,
+            { id: uuidv4(), vendorId: newVendorId, catId: ev.CATEGORY_ID, paramId: ev.PARAMETER_ID, evalScore: ev.EVAL_SCORE, result: ev.RESULT, comment: ev.VENDOR_COMMENT }
+          );
         }
       }
     });
 
-    transaction();
+    await logAudit(userId, 'DUPLICATE', 'da_sheet', newSheetId, { originalId: sheetId });
 
-    logAudit(userId, 'DUPLICATE', 'da_sheet', newSheetId, {
-      originalId: sheetId,
-    });
-
-    const row = db
-      .prepare('SELECT * FROM da_sheets WHERE id = ?')
-      .get(newSheetId) as SheetRow;
-    res.status(201).json({ sheet: assembleSheet(row) });
+    const result = await execute<SheetRow>('SELECT * FROM da_sheets WHERE id = :id', { id: newSheetId });
+    res.status(201).json({ sheet: await assembleSheet(result.rows![0]) });
   } catch (error) {
     logger.error({ error }, 'Failed to duplicate DA sheet');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/sheets/:id/share — Share sheet with another user
+// POST /api/sheets/:id/share
 router.post(
   '/:id/share',
   validate(shareAccessSchema),
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     try {
-      const db = getDb();
       const sheetId = req.params.id;
       const userId = req.user!.userId;
 
-      const sheet = db
-        .prepare('SELECT created_by FROM da_sheets WHERE id = ?')
-        .get(sheetId) as { created_by: string } | undefined;
-
-      if (!sheet) {
+      const sheet = await execute<{ CREATED_BY: string }>(
+        'SELECT created_by FROM da_sheets WHERE id = :id', { id: sheetId }
+      );
+      if (!sheet.rows?.length) {
         res.status(404).json({ error: 'DA Sheet not found' });
         return;
       }
-
-      if (sheet.created_by !== userId && req.user!.role !== 'admin') {
+      if (sheet.rows[0].CREATED_BY !== userId && req.user!.role !== 'admin') {
         res.status(403).json({ error: 'Only the owner or admin can share this sheet' });
         return;
       }
 
       const { email, accessLevel } = req.body;
 
-      // Upsert shared access
-      db.prepare(
-        `INSERT INTO shared_access (id, da_sheet_id, user_email, access_level)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(da_sheet_id, user_email) DO UPDATE SET access_level = ?`
-      ).run(uuidv4(), sheetId, email, accessLevel, accessLevel);
+      await transaction(async (conn) => {
+        // Oracle MERGE for upsert
+        await conn.execute(
+          `MERGE INTO shared_access sa
+           USING (SELECT :sheetId AS da_sheet_id, :email AS user_email FROM dual) src
+           ON (sa.da_sheet_id = src.da_sheet_id AND sa.user_email = src.user_email)
+           WHEN MATCHED THEN UPDATE SET access_level = :accessLevel
+           WHEN NOT MATCHED THEN INSERT (id, da_sheet_id, user_email, access_level)
+             VALUES (:id, :sheetId, :email, :accessLevel)`,
+          { id: uuidv4(), sheetId, email, accessLevel }
+        );
+      });
 
-      logAudit(userId, 'SHARE', 'da_sheet', sheetId, { email, accessLevel });
-
+      await logAudit(userId, 'SHARE', 'da_sheet', sheetId, { email, accessLevel });
       res.json({ message: 'Sheet shared successfully' });
     } catch (error) {
       logger.error({ error }, 'Failed to share DA sheet');
@@ -578,35 +532,33 @@ router.post(
   }
 );
 
-// DELETE /api/sheets/:id/share/:email — Remove shared access
-router.delete('/:id/share/:email', (req: Request, res: Response): void => {
+// DELETE /api/sheets/:id/share/:email
+router.delete('/:id/share/:email', async (req: Request, res: Response): Promise<void> => {
   try {
-    const db = getDb();
     const sheetId = req.params.id;
     const email = decodeURIComponent(req.params.email);
     const userId = req.user!.userId;
 
-    const sheet = db
-      .prepare('SELECT created_by FROM da_sheets WHERE id = ?')
-      .get(sheetId) as { created_by: string } | undefined;
-
-    if (!sheet) {
+    const sheet = await execute<{ CREATED_BY: string }>(
+      'SELECT created_by FROM da_sheets WHERE id = :id', { id: sheetId }
+    );
+    if (!sheet.rows?.length) {
       res.status(404).json({ error: 'DA Sheet not found' });
       return;
     }
-
-    if (sheet.created_by !== userId && req.user!.role !== 'admin') {
+    if (sheet.rows[0].CREATED_BY !== userId && req.user!.role !== 'admin') {
       res.status(403).json({ error: 'Only the owner or admin can manage sharing' });
       return;
     }
 
-    db.prepare('DELETE FROM shared_access WHERE da_sheet_id = ? AND user_email = ?').run(
-      sheetId,
-      email
-    );
+    await transaction(async (conn) => {
+      await conn.execute(
+        'DELETE FROM shared_access WHERE da_sheet_id = :sheetId AND user_email = :email',
+        { sheetId, email }
+      );
+    });
 
-    logAudit(userId, 'UNSHARE', 'da_sheet', sheetId, { email });
-
+    await logAudit(userId, 'UNSHARE', 'da_sheet', sheetId, { email });
     res.json({ message: 'Access removed' });
   } catch (error) {
     logger.error({ error }, 'Failed to remove shared access');

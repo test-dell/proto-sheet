@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import { getDb } from '../db/index.js';
+import { getConnection, transaction } from '../db/index.js';
 import { JwtPayload } from '../middleware/auth.js';
 import logger from '../utils/logger.js';
 
@@ -10,14 +10,15 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 const BCRYPT_ROUNDS = 12;
 
+// Oracle returns uppercase column names by default
 interface UserRow {
-  id: string;
-  emp_code: string;
-  email: string;
-  password_hash: string;
-  role: 'admin' | 'user';
-  created_at: string;
-  updated_at: string;
+  ID: string;
+  EMP_CODE: string;
+  EMAIL: string;
+  PASSWORD_HASH: string;
+  ROLE: 'admin' | 'user';
+  CREATED_AT: string;
+  UPDATED_AT: string;
 }
 
 export interface AuthTokens {
@@ -38,81 +39,106 @@ export async function registerUser(
   password: string,
   role: 'admin' | 'user' = 'user'
 ): Promise<UserResponse> {
-  const db = getDb();
+  const connection = await getConnection();
+  try {
+    // Check for existing user
+    const existing = await connection.execute<{ ID: string }>(
+      `SELECT id FROM users WHERE emp_code = :empCode OR email = :email`,
+      { empCode, email }
+    );
 
-  // Check for existing user
-  const existing = db
-    .prepare('SELECT id FROM users WHERE emp_code = ? OR email = ?')
-    .get(empCode, email) as { id: string } | undefined;
+    if (existing.rows && existing.rows.length > 0) {
+      throw new Error('User with this employee code or email already exists');
+    }
 
-  if (existing) {
-    throw new Error('User with this employee code or email already exists');
+    const id = uuidv4();
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    await connection.execute(
+      `INSERT INTO users (id, emp_code, email, password_hash, role)
+       VALUES (:id, :empCode, :email, :passwordHash, :role)`,
+      { id, empCode, email, passwordHash, role }
+    );
+
+    await connection.commit();
+    logger.info({ empCode, role }, 'User registered');
+
+    return { id, empCode, email, role };
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    await connection.close();
   }
-
-  const id = uuidv4();
-  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-
-  db.prepare(
-    'INSERT INTO users (id, emp_code, email, password_hash, role) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, empCode, email, passwordHash, role);
-
-  logger.info({ empCode, role }, 'User registered');
-
-  return { id, empCode, email, role };
 }
 
 export async function loginUser(
   empCode: string,
   password: string
 ): Promise<{ user: UserResponse; tokens: AuthTokens }> {
-  const db = getDb();
+  return transaction(async (connection) => {
+    const result = await connection.execute<UserRow>(
+      `SELECT * FROM users WHERE emp_code = :empCode`,
+      { empCode }
+    );
 
-  const user = db
-    .prepare('SELECT * FROM users WHERE emp_code = ?')
-    .get(empCode) as UserRow | undefined;
+    const user = result.rows?.[0];
+    if (!user) {
+      throw new Error('Invalid credentials');
+    }
 
-  if (!user) {
-    throw new Error('Invalid credentials');
-  }
+    const isValid = await bcrypt.compare(password, user.PASSWORD_HASH);
+    if (!isValid) {
+      throw new Error('Invalid credentials');
+    }
 
-  const isValid = await bcrypt.compare(password, user.password_hash);
-  if (!isValid) {
-    throw new Error('Invalid credentials');
-  }
+    const tokens = generateTokens(user);
 
-  const tokens = generateTokens(user);
+    // Store refresh token
+    const refreshTokenHash = await bcrypt.hash(tokens.refreshToken, 10);
+    const expiresAt = new Date(Date.now() + parseDuration(JWT_REFRESH_EXPIRES_IN));
 
-  // Store refresh token
-  const refreshTokenHash = await bcrypt.hash(tokens.refreshToken, 10);
-  const expiresAt = new Date(Date.now() + parseDuration(JWT_REFRESH_EXPIRES_IN));
+    await connection.execute(
+      `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
+       VALUES (:id, :userId, :tokenHash, :expiresAt)`,
+      {
+        id: uuidv4(),
+        userId: user.ID,
+        tokenHash: refreshTokenHash,
+        expiresAt,
+      }
+    );
 
-  db.prepare(
-    'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)'
-  ).run(uuidv4(), user.id, refreshTokenHash, expiresAt.toISOString());
+    // Audit log
+    await connection.execute(
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id)
+       VALUES (:id, :userId, :action, :entityType, :entityId)`,
+      {
+        id: uuidv4(),
+        userId: user.ID,
+        action: 'LOGIN',
+        entityType: 'user',
+        entityId: user.ID,
+      }
+    );
 
-  // Audit log
-  db.prepare(
-    'INSERT INTO audit_log (id, user_id, action, entity_type, entity_id) VALUES (?, ?, ?, ?, ?)'
-  ).run(uuidv4(), user.id, 'LOGIN', 'user', user.id);
+    logger.info({ empCode: user.EMP_CODE }, 'User logged in');
 
-  logger.info({ empCode: user.emp_code }, 'User logged in');
-
-  return {
-    user: {
-      id: user.id,
-      empCode: user.emp_code,
-      email: user.email,
-      role: user.role,
-    },
-    tokens,
-  };
+    return {
+      user: {
+        id: user.ID,
+        empCode: user.EMP_CODE,
+        email: user.EMAIL,
+        role: user.ROLE,
+      },
+      tokens,
+    };
+  });
 }
 
 export async function refreshAccessToken(
   refreshToken: string
 ): Promise<AuthTokens> {
-  const db = getDb();
-
   // Verify the refresh token JWT
   let payload: JwtPayload;
   try {
@@ -121,80 +147,99 @@ export async function refreshAccessToken(
     throw new Error('Invalid refresh token');
   }
 
-  // Find non-revoked tokens for this user
-  const storedTokens = db
-    .prepare(
-      'SELECT * FROM refresh_tokens WHERE user_id = ? AND revoked_at IS NULL AND expires_at > datetime(?)'
-    )
-    .all(payload.userId, new Date().toISOString()) as Array<{
-    id: string;
-    token_hash: string;
-  }>;
+  return transaction(async (connection) => {
+    // Find non-revoked tokens for this user
+    const result = await connection.execute<{ ID: string; TOKEN_HASH: string }>(
+      `SELECT id, token_hash FROM refresh_tokens
+       WHERE user_id = :userId AND revoked_at IS NULL AND expires_at > :now`,
+      { userId: payload.userId, now: new Date() }
+    );
 
-  // Verify against stored hashes
-  let matchedTokenId: string | null = null;
-  for (const stored of storedTokens) {
-    const matches = await bcrypt.compare(refreshToken, stored.token_hash);
-    if (matches) {
-      matchedTokenId = stored.id;
-      break;
+    const storedTokens = result.rows || [];
+
+    // Verify against stored hashes
+    let matchedTokenId: string | null = null;
+    for (const stored of storedTokens) {
+      const matches = await bcrypt.compare(refreshToken, stored.TOKEN_HASH);
+      if (matches) {
+        matchedTokenId = stored.ID;
+        break;
+      }
     }
-  }
 
-  if (!matchedTokenId) {
-    throw new Error('Refresh token not found or revoked');
-  }
+    if (!matchedTokenId) {
+      throw new Error('Refresh token not found or revoked');
+    }
 
-  // Revoke old refresh token (rotation)
-  db.prepare('UPDATE refresh_tokens SET revoked_at = datetime(?) WHERE id = ?').run(
-    new Date().toISOString(),
-    matchedTokenId
-  );
+    // Revoke old refresh token (rotation)
+    await connection.execute(
+      `UPDATE refresh_tokens SET revoked_at = SYSTIMESTAMP WHERE id = :id`,
+      { id: matchedTokenId }
+    );
 
-  // Get fresh user data
-  const user = db
-    .prepare('SELECT * FROM users WHERE id = ?')
-    .get(payload.userId) as UserRow | undefined;
+    // Get fresh user data
+    const userResult = await connection.execute<UserRow>(
+      `SELECT * FROM users WHERE id = :id`,
+      { id: payload.userId }
+    );
 
-  if (!user) {
-    throw new Error('User not found');
-  }
+    const user = userResult.rows?.[0];
+    if (!user) {
+      throw new Error('User not found');
+    }
 
-  // Generate new tokens
-  const tokens = generateTokens(user);
+    // Generate new tokens
+    const tokens = generateTokens(user);
 
-  // Store new refresh token
-  const newRefreshHash = await bcrypt.hash(tokens.refreshToken, 10);
-  const expiresAt = new Date(Date.now() + parseDuration(JWT_REFRESH_EXPIRES_IN));
+    // Store new refresh token
+    const newRefreshHash = await bcrypt.hash(tokens.refreshToken, 10);
+    const expiresAt = new Date(Date.now() + parseDuration(JWT_REFRESH_EXPIRES_IN));
 
-  db.prepare(
-    'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)'
-  ).run(uuidv4(), user.id, newRefreshHash, expiresAt.toISOString());
+    await connection.execute(
+      `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
+       VALUES (:id, :userId, :tokenHash, :expiresAt)`,
+      {
+        id: uuidv4(),
+        userId: user.ID,
+        tokenHash: newRefreshHash,
+        expiresAt,
+      }
+    );
 
-  return tokens;
+    return tokens;
+  });
 }
 
 export async function logoutUser(userId: string): Promise<void> {
-  const db = getDb();
+  return transaction(async (connection) => {
+    // Revoke all refresh tokens for this user
+    await connection.execute(
+      `UPDATE refresh_tokens SET revoked_at = SYSTIMESTAMP
+       WHERE user_id = :userId AND revoked_at IS NULL`,
+      { userId }
+    );
 
-  // Revoke all refresh tokens for this user
-  db.prepare('UPDATE refresh_tokens SET revoked_at = datetime(?) WHERE user_id = ? AND revoked_at IS NULL').run(
-    new Date().toISOString(),
-    userId
-  );
+    await connection.execute(
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id)
+       VALUES (:id, :userId, :action, :entityType, :entityId)`,
+      {
+        id: uuidv4(),
+        userId,
+        action: 'LOGOUT',
+        entityType: 'user',
+        entityId: userId,
+      }
+    );
 
-  db.prepare(
-    'INSERT INTO audit_log (id, user_id, action, entity_type, entity_id) VALUES (?, ?, ?, ?, ?)'
-  ).run(uuidv4(), userId, 'LOGOUT', 'user', userId);
-
-  logger.info({ userId }, 'User logged out');
+    logger.info({ userId }, 'User logged out');
+  });
 }
 
 function generateTokens(user: UserRow): AuthTokens {
   const payload: JwtPayload = {
-    userId: user.id,
-    empCode: user.emp_code,
-    role: user.role,
+    userId: user.ID,
+    empCode: user.EMP_CODE,
+    role: user.ROLE,
   };
 
   const accessToken = jwt.sign(payload, JWT_SECRET, {
